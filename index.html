@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebRTC Sender (Mobile Camera)</title>
+    <style>
+        body { font-family: sans-serif; text-align: center; }
+        #localVideo { width: 100%; max-width: 400px; border: 2px solid green; }
+        .controls { margin-top: 20px; }
+        .status { margin-top: 10px; color: blue; }
+    </style>
+</head>
+<body>
+
+    <h1>📱 Sender (Mobile)</h1>
+    <div class="status" id="status">Status: Connecting...</div>
+
+    <video id="localVideo" autoplay playsinline muted></video>
+
+    <div class="controls">
+        <input type="text" id="roomIdInput" value="testRoom123" placeholder="Enter Room ID">
+        <button onclick="startCall()" id="startButton">Start Stream</button>
+    </div>
+
+    <script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+
+    <script>
+        const SIGNALING_SERVER_URL = "https://signaling-server-happymoves.onrender.com";
+        const socket = io(SIGNALING_SERVER_URL);
+        const localVideo = document.getElementById('localVideo');
+        const statusDiv = document.getElementById('status');
+        const startButton = document.getElementById('startButton');
+
+        let peerConnection;
+        let localStream;
+        let roomId;
+
+        socket.on('connect', () => {
+            statusDiv.textContent = `Status: Connected to signaling server (ID: ${socket.id})`;
+            startButton.disabled = false;
+        });
+
+        socket.on('connect_error', (err) => {
+            statusDiv.textContent = `Status: Connection Error: ${err.message}`;
+            startButton.disabled = true;
+        });
+
+        socket.on('error', (data) => {
+            console.error('Server Error:', data.message);
+            statusDiv.textContent = `Status: Error - ${data.message}`;
+        });
+
+        socket.on('joined', (data) => {
+            console.log('Joined room:', data.roomId, 'Participants:', data.participants);
+            statusDiv.textContent = `Status: Joined room ${data.roomId}. Waiting for receiver...`;
+            // If there's another peer, initiate the call (create offer)
+            if (data.participants.length > 0) {
+                createOffer(data.participants[0]);
+            }
+        });
+
+        socket.on('peer-joined', (data) => {
+            console.log('New peer joined:', data.socketId);
+            statusDiv.textContent = `Status: Peer ${data.socketId} joined. Sending offer...`;
+            // New peer joined, send them an offer
+            createOffer(data.socketId);
+        });
+
+        socket.on('answer', async (data) => {
+            console.log('Received Answer from:', data.from);
+            statusDiv.textContent = `Status: Received answer. Connection established!`;
+            // Receiver replied, set their answer as the remote description
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        });
+
+        socket.on('ice-candidate', async (data) => {
+            console.log('Received ICE Candidate:', data.candidate);
+            try {
+                // Add the remote ICE candidate to the peer connection
+                await peerConnection.addIceCandidate(data.candidate);
+            } catch (e) {
+                console.error('Error adding received ice candidate:', e);
+            }
+        });
+
+        async function startCall() {
+            roomId = document.getElementById('roomIdInput').value.trim();
+            if (!roomId) return alert('Please enter a Room ID');
+
+            startButton.disabled = true;
+            statusDiv.textContent = 'Status: Accessing camera...';
+
+            try {
+                // Get access to the camera and microphone
+                localStream = await navigator.mediaDevices.getUserMedia({ 
+                    video: true, 
+                    audio: true 
+                });
+                localVideo.srcObject = localStream;
+                statusDiv.textContent = 'Status: Camera accessed. Joining room...';
+                
+                // Initialize the RTCPeerConnection
+                createPeerConnection();
+
+                // Add the local stream tracks to the peer connection
+                localStream.getTracks().forEach(track => {
+                    peerConnection.addTrack(track, localStream);
+                });
+
+                // Join the room on the signaling server
+                socket.emit('join', { roomId: roomId });
+
+            } catch (err) {
+                console.error("Error accessing media devices:", err);
+                statusDiv.textContent = `Status: Error accessing camera. ${err.name}`;
+                startButton.disabled = false;
+            }
+        }
+
+        function createPeerConnection() {
+            // Use Google's public STUN server for NAT traversal
+            const config = {
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            };
+            peerConnection = new RTCPeerConnection(config);
+
+            // Handle ICE candidate generation
+            peerConnection.onicecandidate = ({ candidate }) => {
+                if (candidate) {
+                    // Send the candidate to the other peer via the signaling server
+                    socket.emit('ice-candidate', { 
+                        roomId: roomId, 
+                        candidate: candidate 
+                    });
+                }
+            };
+
+            peerConnection.onconnectionstatechange = () => {
+                console.log('Connection state:', peerConnection.connectionState);
+                if (peerConnection.connectionState === 'connected') {
+                    statusDiv.textContent = 'Status: WebRTC Connection established!';
+                }
+            };
+        }
+
+        async function createOffer(toSocketId) {
+            try {
+                // Create the SDP Offer
+                const offer = await peerConnection.createOffer();
+                // Set the local description
+                await peerConnection.setLocalDescription(offer);
+                
+                // Send the offer to the specific receiver peer via the signaling server
+                socket.emit('offer', { 
+                    roomId: roomId, 
+                    sdp: peerConnection.localDescription, 
+                    toSocketId: toSocketId 
+                });
+                console.log('Offer sent to:', toSocketId);
+
+            } catch (err) {
+                console.error('Error creating offer:', err);
+            }
+        }
+    </script>
+
+</body>
+</html>
